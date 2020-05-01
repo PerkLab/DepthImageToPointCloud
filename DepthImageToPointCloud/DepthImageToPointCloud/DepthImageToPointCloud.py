@@ -16,15 +16,19 @@ class DepthImageToPointCloud(ScriptedLoadableModule):
 
   def __init__(self, parent):
     ScriptedLoadableModule.__init__(self, parent)
-    self.parent.title = "Depth Image To Point Cloud"
-    self.parent.categories = ["IGT"]
+    self.parent.title = "DepthImageToPointCloud" # TODO make this more human readable by adding spaces
+    self.parent.categories = ["RealSense"]
     self.parent.dependencies = []
-    self.parent.contributors = ["Colton Barr & Andras Lasso (Perk Lab, Queen's University)"]
+    self.parent.contributors = ["John Doe (AnyWare Corp.)"] # replace with "Firstname Lastname (Organization)"
     self.parent.helpText = """
-This extension maps Intel RealSense depth images into spatial point clouds.
+This is an example of scripted loadable module bundled in an extension.
+It performs a simple thresholding on the input volume and optionally captures a screenshot.
 """
     self.parent.helpText += self.getDefaultModuleDocumentationLink()
-    self.parent.acknowledgementText = """"""
+    self.parent.acknowledgementText = """
+This file was originally developed by Jean-Christophe Fillion-Robin, Kitware Inc.
+and Steve Pieper, Isomics, Inc. and was partially funded by NIH grant 3P41RR013218-12S1.
+""" # replace with organization, grant and thanks.
 
 #
 # DepthImageToPointCloudWidget
@@ -38,6 +42,9 @@ class DepthImageToPointCloudWidget(ScriptedLoadableModuleWidget):
   def setup(self):
     ScriptedLoadableModuleWidget.setup(self)
 
+    #Instantiate the logic module
+    self.logic = DepthImageToPointCloudLogic()
+
     # Load widget from .ui file (created by Qt Designer)
     uiWidget = slicer.util.loadUI(self.resourcePath('UI/DepthImageToPointCloud.ui'))
     self.layout.addWidget(uiWidget)
@@ -47,7 +54,9 @@ class DepthImageToPointCloudWidget(ScriptedLoadableModuleWidget):
     self.ui.outputSelector.setMRMLScene(slicer.mrmlScene)
 
     # connections
-    self.ui.applyButton.connect('clicked(bool)', self.onApplyButton)
+    self.ui.updateButton.connect('clicked(bool)', self.onUpdateButton)
+    self.ui.startStreamingButton.connect('clicked(bool)', self.onStartStreamingButton)
+    self.ui.stopStreamingButton.connect('clicked(bool)', self.onStopStreamingButton)
     self.ui.inputSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSelect)
     self.ui.outputSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSelect)
 
@@ -61,17 +70,64 @@ class DepthImageToPointCloudWidget(ScriptedLoadableModuleWidget):
     pass
 
   def onSelect(self):
-    self.ui.applyButton.enabled = self.ui.inputSelector.currentNode() and self.ui.outputSelector.currentNode()
+    self.ui.updateButton.enabled = self.ui.inputSelector.currentNode() and self.ui.outputSelector.currentNode()
+    self.ui.startStreamingButton.enabled = self.ui.inputSelector.currentNode() and self.ui.outputSelector.currentNode()
 
-  def onApplyButton(self):
-    logic = DepthImageToPointCloudLogic()
+  def onUpdateButton(self):
+    [cameraParams, pointCloudParams] = self.getParams()
+    self.logic.run(self.ui.inputSelector.currentNode(), self.ui.outputSelector.currentNode(), cameraParams, pointCloudParams)
+
+  def onStartStreamingButton(self):
+    [cameraParams, pointCloudParams] = self.getParams()
+
+    #Disable the start streaming and update buttons, enable stop streaming button
+    self.ui.startStreamingButton.enabled = False
+    self.ui.updateButton.enabled = False
+    self.ui.stopStreamingButton.enabled = True
+    self.disableAllInputs()
+
+    self.logic.startStreaming(self.ui.inputSelector.currentNode(), self.ui.outputSelector.currentNode(), cameraParams, pointCloudParams)
+
+  def onStopStreamingButton(self):
+    #Enable the start streaming and update buttons, Disable stop streaming button
+    self.ui.startStreamingButton.enabled = True
+    self.ui.updateButton.enabled = True
+    self.ui.stopStreamingButton.enabled = False
+    self.enableAllInputs()
+
+    self.logic.stopStreaming(self.ui.inputSelector.currentNode())
+
+  def getParams(self):
     cameraParams = {"focalLength" : self.ui.focalLength.value, 
                     "principlePointX" : self.ui.principlePointX.value,
                     "principlePointY" : self.ui.principlePointY.value}
     pointCloudParams = {"thresholdLower" : self.ui.thresholdLower.value, 
                     "thresholdUpper" : self.ui.thresholdUpper.value,
-                    "depthScale" : self.ui.depthScale.value}
-    logic.run(self.ui.inputSelector.currentNode(), self.ui.outputSelector.currentNode(), cameraParams, pointCloudParams)
+                    "depthScale" : self.ui.depthScale.value,
+                    "ptCloudDensity" : self.ui.ptCloudDensity.value}
+    return [cameraParams, pointCloudParams]   
+
+  def disableAllInputs(self):
+     self.ui.inputSelector.enabled = False
+     self.ui.outputSelector.enabled = False
+     self.ui.focalLength.enabled = False
+     self.ui.principlePointX.enabled = False
+     self.ui.principlePointY.enabled = False
+     self.ui.thresholdLower.enabled = False
+     self.ui.thresholdUpper.enabled = False
+     self.ui.depthScale.enabled = False
+     self.ui.ptCloudDensity.enabled = False
+
+  def enableAllInputs(self):
+     self.ui.inputSelector.enabled = True
+     self.ui.outputSelector.enabled = True
+     self.ui.focalLength.enabled = True
+     self.ui.principlePointX.enabled = True
+     self.ui.principlePointY.enabled = True
+     self.ui.thresholdLower.enabled = True
+     self.ui.thresholdUpper.enabled = True
+     self.ui.depthScale.enabled = True
+     self.ui.ptCloudDensity.enabled = True
 
 #
 # DepthImageToPointCloudLogic
@@ -115,28 +171,28 @@ class DepthImageToPointCloudLogic(ScriptedLoadableModuleLogic):
     return True
 
   #Update the polydata
-  def depthDataCallback(self,caller, eventId):
-    extractFilterDepth = vtk.vtkImageExtractComponents()
-    extractFilterDepth.SetInputData(depthMap.GetImageData())
-    extractFilterDepth.SetComponents(0)
-    extractFilterDepth.Update()
-    imageDepth = extractFilterDepth.GetOutput()
-    vtkDataDepth = imageDepth.GetPointData().GetScalars()
-    numpyDataDepth = numpy_support.vtk_to_numpy(vtkDataDepth)
-    numpyDataDepth = numpyDataDepth.reshape(dims[0], dims[1])
-    listOfPoints = generate_pointcloud(numpyDataDepth)
-    polyData = generatePolyData(listOfPoints)
-    pointCloudModel.SetAndObservePolyData(polyData)
+  def pointCloudCallback(self,caller, eventId):
+    self.run(self.inputVolume, self.outputVolume, self.cameraParams, self.pointCloudParams)
 
-    {"focalLength" : self.ui.focalLength.value, 
-                    "principlePointX" : self.ui.principlePointX.value,
-                    "principlePointY" : self.ui.principlePointY.value}
+  def startStreaming(self, inputVolume, outputVolume, cameraParams, pointCloudParams):
+    #Save all values locally in logic object
+    self.inputVolume = inputVolume
+    self.outputVolume = outputVolume
+    self.cameraParams = cameraParams
+    self.pointCloudParams = pointCloudParams
+
+    #Add an observer to the input image to continue updating point cloud continuously
+    inputVolume.AddObserver(inputVolume.ImageDataModifiedEvent, self.pointCloudCallback)
+
+  def stopStreaming(self, inputVolume):
+    #Remove the observer on inputVolume
+    inputVolume.RemoveAllObservers()
 
   #Takes a dim[0] by dim[1] numpy array, and returns a list of [X Y Z] coordinates
   def generate_pointcloud(self,depthData, cameraParams, pointCloudParams):
     points = []    
-    for i in range(0,depthData.shape[0],1):
-        for j in range(0,depthData.shape[1],1):
+    for i in range(0,depthData.shape[0],pointCloudParams['ptCloudDensity']):
+        for j in range(0,depthData.shape[1],pointCloudParams['ptCloudDensity']):
             Z = depthData[i,j] / pointCloudParams['depthScale']
             if Z==0 or Z > pointCloudParams['thresholdUpper'] or Z < pointCloudParams['thresholdLower']: continue
             X = (i - cameraParams["principlePointX"]) * Z / cameraParams["focalLength"]
@@ -169,8 +225,6 @@ class DepthImageToPointCloudLogic(ScriptedLoadableModuleLogic):
     if not self.hasImageData(inputVolume):
       return False
 
-    logging.info('Processing started')
-
     inputImage = inputVolume.GetImageData()
     imageDims = inputImage.GetDimensions()[0:2]
     
@@ -190,8 +244,6 @@ class DepthImageToPointCloudLogic(ScriptedLoadableModuleLogic):
     polyData = self.generatePolyData(listOfPoints)
 
     outputVolume.SetAndObservePolyData(polyData)
- 
-    logging.info('Processing completed')
 
     return True
 
